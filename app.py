@@ -12,7 +12,7 @@ RECIPIENT_EMAIL = "maksinik1977@gmail.com"
 
 def create_app() -> Flask:
     app = Flask(__name__, static_folder='.', static_url_path='')
-    CORS(app, origins=["https://maks-mk.github.io"])
+    CORS(app, origins=["https://maks-mk.github.io", "null"])
 
     @app.route('/ping', methods=["GET", "HEAD"])
     def ping():
