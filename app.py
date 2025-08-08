@@ -18,9 +18,9 @@ def create_app() -> Flask:
     def ping():
         return jsonify({"status": "ok"}), 200
 
-    @app.route('/')
-    def root():
-        return send_from_directory('.', 'index.html')
+  #  @app.route('/')
+   # def root():
+    #    return send_from_directory('.', 'index.html')
 
     @app.route('/api/contact', methods=['POST'])
     def contact():
@@ -38,6 +38,10 @@ def create_app() -> Flask:
             return jsonify({"error": f"Не удалось отправить письмо: {exc}"}), 500
 
         return jsonify({"ok": True})
+        
+    @app.route('/health')
+    def health_check():
+        return "OK", 200
 
     return app
 
@@ -93,11 +97,6 @@ def send_email(*, name: str, email: str, message: str) -> None:
             server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_user, [RECIPIENT_EMAIL], msg.as_string())
             
-@app.route('/health')
-def health_check():
-    return "OK", 200
-
-
 app = create_app()
 
 if __name__ == '__main__':
