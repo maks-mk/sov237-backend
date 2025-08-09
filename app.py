@@ -12,15 +12,22 @@ RECIPIENT_EMAIL = "sov23725@gmail.com"
 
 def create_app() -> Flask:
     app = Flask(__name__, static_folder='.', static_url_path='')
-    CORS(app, origins=["https://maks-mk.github.io", "null"])
+    CORS(app, origins=[
+        "https://maks-mk.github.io",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+        "null"
+    ])
 
     @app.route('/ping', methods=["GET", "HEAD"])
     def ping():
         return jsonify({"status": "ok"}), 200
 
-  #  @app.route('/')
-   # def root():
-    #    return send_from_directory('.', 'index.html')
+    @app.route('/')
+    def root():
+        return send_from_directory('.', 'index.html')
 
     @app.route('/api/contact', methods=['POST'])
     def contact():
