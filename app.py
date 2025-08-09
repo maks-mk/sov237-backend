@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
 
-RECIPIENT_EMAIL = "maksinik1977@gmail.com"
+RECIPIENT_EMAIL = "sov23725@gmail.com"
 
 
 def create_app() -> Flask:
