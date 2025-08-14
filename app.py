@@ -152,9 +152,9 @@ def send_thanks_email_to_user(*, name: str, user_email: str, original_message: s
     """
     smtp_host, smtp_port, smtp_user, smtp_pass, use_tls, use_ssl = _smtp_config()
 
-    subject = os.getenv('ACK_SUBJECT', 'Спасибо за поддержку!')
+    subject = os.getenv('ACK_SUBJECT', 'Спасибо за поддержку проекта по реконструкции дорог!')
     greeting = os.getenv('ACK_GREETING', 'Здравствуйте')
-    signature = os.getenv('ACK_SIGNATURE', 'С уважением, команда поддержки')
+    signature = os.getenv('ACK_SIGNATURE', 'С уважением, команда проекта по реконструкции дорог в нашем районе.')
 
     msg = MIMEMultipart('alternative')
     msg['Subject'] = subject
@@ -166,8 +166,9 @@ def send_thanks_email_to_user(*, name: str, user_email: str, original_message: s
     <html>
       <body>
         <p>{greeting}, {name}!</p>
-        <p>Мы получили ваше сообщение и уже посмотрим его в ближайшее время.</p>
-        <p>Спасибо, что поддерживаете проект — это очень помогает нам развиваться.</p>
+        <p>Мы получили ваше сообщение и обязательно его рассмотрим.</p>
+        <p>Спасибо, что поддерживаете проект по реконструкции дорог в нашем районе —
+        ваша помощь и активное участие помогают нам улучшать инфраструктуру и благоустройство.</p>
         <hr/>
         <p><b>Ваше сообщение:</b><br/>{original_message.replace('\n', '<br/>')}</p>
         <br/>
