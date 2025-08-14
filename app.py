@@ -97,7 +97,8 @@ def _smtp_send(msg: MIMEMultipart, recipients: list[str]) -> None:
         with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20, context=context) as server:
             server.ehlo()
             server.login(smtp_user, smtp_pass)
-            server.sendmail(msg['From'], recipients, msg.as_string())
+            # Можно задать envelope-from отдельно, если внедрите VERP
+            server.sendmail(smtp_user, recipients, msg.as_string())
     else:
         with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
             server.ehlo()
@@ -106,31 +107,33 @@ def _smtp_send(msg: MIMEMultipart, recipients: list[str]) -> None:
                 server.starttls(context=context)
                 server.ehlo()
             server.login(smtp_user, smtp_pass)
-            server.sendmail(msg['From'], recipients, msg.as_string())
+            server.sendmail(smtp_user, recipients, msg.as_string())
 
 
 def send_email_to_owner(*, name: str, email: str, message: str) -> None:
     """
     Письмо владельцу сайта с содержимым формы.
     """
-    smtp_host, smtp_port, smtp_user, smtp_pass, use_tls, use_ssl = _smtp_config()
+    _smtp_config()  # проверяем наличие настроек
 
     msg = MIMEMultipart('alternative')
     msg['Subject'] = 'Новое сообщение с формы обратной связи'
-    msg['From'] = smtp_user
+    msg['From'] = os.getenv('SMTP_USER', 'no-reply@example.com')
     msg['To'] = RECIPIENT_EMAIL
     msg['Reply-To'] = email
 
+    # Простой, нейтральный HTML без переменных из другого контекста
     html_body = f"""
-    <html>
-      <body>
-        <h3>Новое сообщение</h3>
-        <p><b>Имя:</b> {name}</p>
-        <p><b>Email:</b> {email}</p>
-        <p><b>Сообщение:</b><br/>{message.replace('\n', '<br/>')}</p>
-      </body>
-    </html>
-    """.strip()
+<!doctype html>
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif">
+    <h3>Новое сообщение</h3>
+    <p><b>Имя:</b> {name}</p>
+    <p><b>Email:</b> {email}</p>
+    <p><b>Сообщение:</b><br/>{message.replace('\n', '<br/>')}</p>
+  </body>
+</html>
+""".strip()
 
     text_body = (
         f"Новое сообщение\n\nИмя: {name}\nEmail: {email}\n\nСообщение:\n{message}\n"
@@ -144,47 +147,80 @@ def send_email_to_owner(*, name: str, email: str, message: str) -> None:
 
 def send_thanks_email_to_user(*, name: str, user_email: str, original_message: str) -> None:
     """
-    Автоматический ответ на email пользователя из формы Поддержки.
-    Текст можно кастомизировать через переменные окружения:
-      ACK_SUBJECT — тема (по умолчанию 'Спасибо за поддержку!')
-      ACK_GREETING — приветствие (по умолчанию 'Здравствуйте')
-      ACK_SIGNATURE — подпись (по умолчанию 'С уважением, команда поддержки')
+    Автоматический ответ с красивым HTML-шаблоном для проекта по реконструкции дорог.
+    Настраиваемые поля по-прежнему читаются из переменных окружения (при желании):
+      ACK_SUBJECT, ACK_GREETING, ACK_SIGNATURE
     """
-    smtp_host, smtp_port, smtp_user, smtp_pass, use_tls, use_ssl = _smtp_config()
+    _smtp_config()  # проверяем, что SMTP настроен
 
     subject = os.getenv('ACK_SUBJECT', 'Спасибо за поддержку проекта по реконструкции дорог!')
     greeting = os.getenv('ACK_GREETING', 'Здравствуйте')
-    signature = os.getenv('ACK_SIGNATURE', 'С уважением, команда проекта по реконструкции дорог в нашем районе.')
+    signature = os.getenv('ACK_SIGNATURE', 'С уважением, команда проекта «Дороги Шахты»')
 
-    msg = MIMEMultipart('alternative')
+    msg = MIMEMultipart('alternative')  # при добавлении CID-картинок можно заменить на 'related'
     msg['Subject'] = subject
-    msg['From'] = smtp_user
+    msg['From'] = os.getenv('SMTP_USER', 'no-reply@example.com')
     msg['To'] = user_email
     msg['Reply-To'] = RECIPIENT_EMAIL
 
-    html_body = f"""
-    <html>
-      <body>
-        <p>{greeting}, {name}!</p>
-        <p>Мы получили ваше сообщение и обязательно его рассмотрим.</p>
-        <p>Спасибо, что поддерживаете проект по реконструкции дорог в нашем районе —
-        ваша помощь и активное участие помогают нам улучшать инфраструктуру и благоустройство.</p>
-        <hr/>
-        <p><b>Ваше сообщение:</b><br/>{original_message.replace('\n', '<br/>')}</p>
-        <br/>
-        <p>{signature}</p>
-      </body>
-    </html>
-    """.strip()
-
     text_body = (
         f"{greeting}, {name}!\n\n"
-        "Мы получили ваше сообщение и посмотрим его в ближайшее время.\n"
-        "Спасибо, что поддерживаете проект — это очень помогает нам развиваться.\n\n"
+        "Мы получили ваше сообщение и обязательно его рассмотрим.\n"
+        "Спасибо за поддержку проекта по реконструкции дорог в нашем районе.\n\n"
         "Ваше сообщение:\n"
         f"{original_message}\n\n"
         f"{signature}\n"
     )
+
+    html_body = f"""
+<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#0b1220;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#0b1220;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="background:#0f172a;border-radius:16px;overflow:hidden;font-family:Arial,Helvetica,sans-serif;">
+            <tr>
+              <td style="padding:28px 28px 0; text-align:center;">
+                <div style="display:inline-block;padding:6px 12px;border-radius:999px;background:#0b1220;border:1px solid #1f2937;color:#94a3b8;font-size:12px;">Проект «Дороги Шахты»</div>
+                <h2 style="margin:12px 0 4px; color:#dbeafe; font-size:24px; line-height:1.3;">Спасибо за поддержку!</h2>
+                <div style="height:2px;background:linear-gradient(90deg,#60a5fa,#8b5cf6); margin:12px auto 0; width:160px;"></div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:24px 28px 8px;">
+                <p style="margin:0 0 12px; color:#e2e8f0; font-size:16px;">{greeting}, {name}!</p>
+                <p style="margin:0 0 12px; color:#cbd5e1; font-size:15px; line-height:1.6;">
+                  Мы получили ваше сообщение и обязательно его рассмотрим.
+                  Спасибо, что поддерживаете проект по реконструкции внутриквартальных дорог в нашем районе —
+                  ваша активность помогает улучшать инфраструктуру.
+                </p>
+                <div style="background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:16px;margin:18px 0;">
+                  <div style="color:#94a3b8;font-size:12px;margin-bottom:8px;">Ваше сообщение</div>
+                  <div style="white-space:pre-wrap;color:#e5e7eb;font-size:14px;line-height:1.6;">{original_message}</div>
+                </div>
+                <p style="margin:18px 0;">
+                  <a href="https://maks-mk.github.io/sov237" style="background:linear-gradient(90deg,#4f46e5,#9333ea);color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;display:inline-block;font-size:14px;">
+                    Узнать о проекта
+                  </a>
+                </p>
+                <p style="margin:16px 0 0; color:#94a3b8; font-size:13px;">
+                  {signature}
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td style="background:#0b1220;color:#64748b;font-size:12px;padding:14px 28px;text-align:center;border-top:1px solid #1f2937;">
+                Если письмо попало в спам — добавьте нас в адресную книгу.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+""".strip()
 
     msg.attach(MIMEText(text_body, 'plain', 'utf-8'))
     msg.attach(MIMEText(html_body, 'html', 'utf-8'))
