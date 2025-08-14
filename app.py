@@ -1,4 +1,5 @@
 import os
+import re
 import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart
@@ -7,7 +8,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
 
-RECIPIENT_EMAIL = "sov23725@gmail.com"
+RECIPIENT_EMAIL = "sov23725@gmail.com"  # куда приходит сообщение с формы (админ/владелец)
 
 
 def create_app() -> Flask:
@@ -39,13 +40,24 @@ def create_app() -> Flask:
         if not name or not email or not message:
             return jsonify({"error": "Заполните все поля формы"}), 400
 
+        if not _looks_like_email(email):
+            return jsonify({"error": "Некорректный email"}), 400
+
         try:
-            send_email(name=name, email=email, message=message)
+            # 1) Письмо владельцу сайта
+            send_email_to_owner(name=name, email=email, message=message)
         except Exception as exc:
-            return jsonify({"error": f"Не удалось отправить письмо: {exc}"}), 500
+            return jsonify({"error": f"Не удалось отправить письмо владельцу: {exc}"}), 500
+
+        # 2) Автоответ пользователю (не критично, если не получилось — не ломаем форму)
+        try:
+            send_thanks_email_to_user(name=name, user_email=email, original_message=message)
+        except Exception as exc:
+            # Можно записать в логи, но не валим запрос
+            print(f"[WARN] Не удалось отправить автоответ пользователю: {exc}")
 
         return jsonify({"ok": True})
-        
+
     @app.route('/health')
     def health_check():
         return "OK", 200
@@ -53,7 +65,17 @@ def create_app() -> Flask:
     return app
 
 
-def send_email(*, name: str, email: str, message: str) -> None:
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def _looks_like_email(addr: str) -> bool:
+    # Простая проверка формата + защита от внедрения заголовков
+    if "\n" in addr or "\r" in addr:
+        return False
+    return bool(EMAIL_RE.match(addr))
+
+
+def _smtp_config():
     smtp_host = os.getenv('SMTP_HOST', '')
     smtp_port = int(os.getenv('SMTP_PORT', '587'))
     smtp_user = os.getenv('SMTP_USER', '')
@@ -63,6 +85,35 @@ def send_email(*, name: str, email: str, message: str) -> None:
 
     if not smtp_host or not smtp_user or not smtp_pass:
         raise RuntimeError('SMTP настройки не заданы (SMTP_HOST, SMTP_USER, SMTP_PASS)')
+
+    return smtp_host, smtp_port, smtp_user, smtp_pass, use_tls, use_ssl
+
+
+def _smtp_send(msg: MIMEMultipart, recipients: list[str]) -> None:
+    smtp_host, smtp_port, smtp_user, smtp_pass, use_tls, use_ssl = _smtp_config()
+
+    if use_ssl:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20, context=context) as server:
+            server.ehlo()
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(msg['From'], recipients, msg.as_string())
+    else:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+            server.ehlo()
+            if use_tls:
+                context = ssl.create_default_context()
+                server.starttls(context=context)
+                server.ehlo()
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(msg['From'], recipients, msg.as_string())
+
+
+def send_email_to_owner(*, name: str, email: str, message: str) -> None:
+    """
+    Письмо владельцу сайта с содержимым формы.
+    """
+    smtp_host, smtp_port, smtp_user, smtp_pass, use_tls, use_ssl = _smtp_config()
 
     msg = MIMEMultipart('alternative')
     msg['Subject'] = 'Новое сообщение с формы обратной связи'
@@ -88,26 +139,60 @@ def send_email(*, name: str, email: str, message: str) -> None:
     msg.attach(MIMEText(text_body, 'plain', 'utf-8'))
     msg.attach(MIMEText(html_body, 'html', 'utf-8'))
 
-    if use_ssl:
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20, context=context) as server:
-            server.ehlo()
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(smtp_user, [RECIPIENT_EMAIL], msg.as_string())
-    else:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
-            server.ehlo()
-            if use_tls:
-                context = ssl.create_default_context()
-                server.starttls(context=context)
-                server.ehlo()
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(smtp_user, [RECIPIENT_EMAIL], msg.as_string())
-            
+    _smtp_send(msg, [RECIPIENT_EMAIL])
+
+
+def send_thanks_email_to_user(*, name: str, user_email: str, original_message: str) -> None:
+    """
+    Автоматический ответ на email пользователя из формы Поддержки.
+    Текст можно кастомизировать через переменные окружения:
+      ACK_SUBJECT — тема (по умолчанию 'Спасибо за поддержку!')
+      ACK_GREETING — приветствие (по умолчанию 'Здравствуйте')
+      ACK_SIGNATURE — подпись (по умолчанию 'С уважением, команда поддержки')
+    """
+    smtp_host, smtp_port, smtp_user, smtp_pass, use_tls, use_ssl = _smtp_config()
+
+    subject = os.getenv('ACK_SUBJECT', 'Спасибо за поддержку!')
+    greeting = os.getenv('ACK_GREETING', 'Здравствуйте')
+    signature = os.getenv('ACK_SIGNATURE', 'С уважением, команда поддержки')
+
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = smtp_user
+    msg['To'] = user_email
+    msg['Reply-To'] = RECIPIENT_EMAIL
+
+    html_body = f"""
+    <html>
+      <body>
+        <p>{greeting}, {name}!</p>
+        <p>Мы получили ваше сообщение и уже посмотрим его в ближайшее время.</p>
+        <p>Спасибо, что поддерживаете проект — это очень помогает нам развиваться.</p>
+        <hr/>
+        <p><b>Ваше сообщение:</b><br/>{original_message.replace('\n', '<br/>')}</p>
+        <br/>
+        <p>{signature}</p>
+      </body>
+    </html>
+    """.strip()
+
+    text_body = (
+        f"{greeting}, {name}!\n\n"
+        "Мы получили ваше сообщение и посмотрим его в ближайшее время.\n"
+        "Спасибо, что поддерживаете проект — это очень помогает нам развиваться.\n\n"
+        "Ваше сообщение:\n"
+        f"{original_message}\n\n"
+        f"{signature}\n"
+    )
+
+    msg.attach(MIMEText(text_body, 'plain', 'utf-8'))
+    msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+
+    _smtp_send(msg, [user_email])
+
+
 app = create_app()
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', '8000'))
     app.run(host='0.0.0.0', port=port, debug=True)
-
-
