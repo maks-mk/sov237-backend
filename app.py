@@ -30,6 +30,30 @@ def create_app() -> Flask:
     def root():
         return send_from_directory('.', 'index.html')
 
+    @app.route('/api/votes', methods=['GET'])
+    def get_votes():
+        # Возвращаем текущие голоса (можно расширить для сохранения в БД)
+        return jsonify({
+            "votesFor": 245,
+            "votesAgainst": 67,
+            "total": 312
+        })
+
+    @app.route('/api/votes', methods=['POST'])
+    def update_votes():
+        # Простая заглушка для обновления голосов
+        data = request.get_json(silent=True) or {}
+        votes_for = data.get('votesFor', 245)
+        votes_against = data.get('votesAgainst', 67)
+        
+        # В реальном приложении здесь была бы запись в БД
+        return jsonify({
+            "ok": True,
+            "votesFor": votes_for,
+            "votesAgainst": votes_against,
+            "total": votes_for + votes_against
+        })
+
     @app.route('/api/contact', methods=['POST'])
     def contact():
         data = request.get_json(silent=True) or {}
@@ -43,18 +67,31 @@ def create_app() -> Flask:
         if not _looks_like_email(email):
             return jsonify({"error": "Некорректный email"}), 400
 
-        try:
-            # 1) Письмо владельцу сайта
-            send_email_to_owner(name=name, email=email, message=message)
-        except Exception as exc:
-            return jsonify({"error": f"Не удалось отправить письмо владельцу: {exc}"}), 500
+        # Логируем сообщение в консоль (вместо отправки email)
+        print(f"=== НОВОЕ СООБЩЕНИЕ ===")
+        print(f"Имя: {name}")
+        print(f"Email: {email}")
+        print(f"Сообщение: {message}")
+        print(f"========================")
 
-        # 2) Автоответ пользователю (не критично, если не получилось — не ломаем форму)
+        # Пытаемся отправить email, но не ломаем форму если не получается
         try:
-            send_thanks_email_to_user(name=name, user_email=email, original_message=message)
+            # Проверяем наличие SMTP настроек
+            smtp_host = os.getenv('SMTP_HOST', '')
+            if smtp_host:
+                print("[INFO] Отправляем письмо владельцу...")
+                send_email_to_owner(name=name, email=email, message=message)
+                print("[INFO] Письмо владельцу отправлено успешно")
+                
+                print("[INFO] Отправляем автоответ пользователю...")
+                send_thanks_email_to_user(name=name, user_email=email, original_message=message)
+                print("[INFO] Автоответ пользователю отправлен успешно")
+            else:
+                print("[INFO] SMTP не настроен, сообщение только в логах")
         except Exception as exc:
-            # Можно записать в логи, но не валим запрос
-            print(f"[WARN] Не удалось отправить автоответ пользователю: {exc}")
+            print(f"[WARN] Ошибка отправки email: {exc}")
+            import traceback
+            traceback.print_exc()
 
         return jsonify({"ok": True})
 
@@ -91,23 +128,45 @@ def _smtp_config():
 
 def _smtp_send(msg: MIMEMultipart, recipients: list[str]) -> None:
     smtp_host, smtp_port, smtp_user, smtp_pass, use_tls, use_ssl = _smtp_config()
+    
+    print(f"[DEBUG] Подключение к SMTP: {smtp_host}:{smtp_port}")
+    print(f"[DEBUG] Пользователь: {smtp_user}")
+    print(f"[DEBUG] TLS: {use_tls}, SSL: {use_ssl}")
 
-    if use_ssl:
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20, context=context) as server:
-            server.ehlo()
-            server.login(smtp_user, smtp_pass)
-            # Можно задать envelope-from отдельно, если внедрите VERP
-            server.sendmail(smtp_user, recipients, msg.as_string())
-    else:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
-            server.ehlo()
-            if use_tls:
-                context = ssl.create_default_context()
-                server.starttls(context=context)
+    try:
+        if use_ssl:
+            # Для SSL подключения (порт 465)
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30, context=context) as server:
+                server.set_debuglevel(1)  # Включаем отладку
+                server.login(smtp_user, smtp_pass)
+                server.sendmail(smtp_user, recipients, msg.as_string())
+                print("[DEBUG] Письмо отправлено через SSL")
+        else:
+            # Для TLS подключения (порт 587)
+            context = ssl.create_default_context()
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+                server.set_debuglevel(1)  # Включаем отладку
                 server.ehlo()
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(smtp_user, recipients, msg.as_string())
+                if use_tls:
+                    server.starttls(context=context)
+                    server.ehlo()
+                server.login(smtp_user, smtp_pass)
+                server.sendmail(smtp_user, recipients, msg.as_string())
+                print("[DEBUG] Письмо отправлено через TLS")
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"[ERROR] Ошибка аутентификации SMTP: {e}")
+        print("[INFO] Проверьте правильность email и пароля приложения Gmail")
+        raise
+    except smtplib.SMTPConnectError as e:
+        print(f"[ERROR] Ошибка подключения к SMTP: {e}")
+        raise
+    except smtplib.SMTPException as e:
+        print(f"[ERROR] Общая ошибка SMTP: {e}")
+        raise
+    except Exception as e:
+        print(f"[ERROR] Неожиданная ошибка: {e}")
+        raise
 
 
 def send_email_to_owner(*, name: str, email: str, message: str) -> None:
@@ -148,16 +207,14 @@ def send_email_to_owner(*, name: str, email: str, message: str) -> None:
 def send_thanks_email_to_user(*, name: str, user_email: str, original_message: str) -> None:
     """
     Автоматический ответ с красивым HTML-шаблоном для проекта по реконструкции дорог.
-    Настраиваемые поля по-прежнему читаются из переменных окружения (при желании):
-      ACK_SUBJECT, ACK_GREETING, ACK_SIGNATURE
     """
     _smtp_config()  # проверяем, что SMTP настроен
 
-    subject = os.getenv('ACK_SUBJECT', 'Спасибо за поддержку проекта по реконструкции дорог!')
+    subject = os.getenv('ACK_SUBJECT', 'Спасибо за обращение!')
     greeting = os.getenv('ACK_GREETING', 'Здравствуйте')
     signature = os.getenv('ACK_SIGNATURE', 'С уважением, команда проекта «Дороги Шахты»')
 
-    msg = MIMEMultipart('alternative')  # при добавлении CID-картинок можно заменить на 'related'
+    msg = MIMEMultipart('alternative')
     msg['Subject'] = subject
     msg['From'] = os.getenv('SMTP_USER', 'no-reply@example.com')
     msg['To'] = user_email
@@ -166,7 +223,7 @@ def send_thanks_email_to_user(*, name: str, user_email: str, original_message: s
     text_body = (
         f"{greeting}, {name}!\n\n"
         "Мы получили ваше сообщение и обязательно его рассмотрим.\n"
-        "Спасибо за поддержку проекта по реконструкции дорог в нашем районе.\n\n"
+        "Спасибо за интерес к проекту по реконструкции дорог.\n\n"
         "Ваше сообщение:\n"
         f"{original_message}\n\n"
         f"{signature}\n"
@@ -183,7 +240,7 @@ def send_thanks_email_to_user(*, name: str, user_email: str, original_message: s
             <tr>
               <td style="padding:28px 28px 0; text-align:center;">
                 <div style="display:inline-block;padding:6px 12px;border-radius:999px;background:#0b1220;border:1px solid #1f2937;color:#94a3b8;font-size:12px;">Проект «Дороги Шахты»</div>
-                <h2 style="margin:12px 0 4px; color:#dbeafe; font-size:24px; line-height:1.3;">Спасибо за поддержку!</h2>
+                <h2 style="margin:12px 0 4px; color:#dbeafe; font-size:24px; line-height:1.3;">Спасибо за обращение!</h2>
                 <div style="height:2px;background:linear-gradient(90deg,#60a5fa,#8b5cf6); margin:12px auto 0; width:160px;"></div>
               </td>
             </tr>
@@ -192,8 +249,7 @@ def send_thanks_email_to_user(*, name: str, user_email: str, original_message: s
                 <p style="margin:0 0 12px; color:#e2e8f0; font-size:16px;">{greeting}, {name}!</p>
                 <p style="margin:0 0 12px; color:#cbd5e1; font-size:15px; line-height:1.6;">
                   Мы получили ваше сообщение и обязательно его рассмотрим.
-                  Спасибо, что поддерживаете проект по реконструкции внутриквартальных дорог в нашем районе —
-                  ваша активность помогает улучшать инфраструктуру.
+                  Спасибо за интерес к проекту по реконструкции внутриквартальных дорог в нашем районе.
                 </p>
                 <div style="background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:16px;margin:18px 0;">
                   <div style="color:#94a3b8;font-size:12px;margin-bottom:8px;">Ваше сообщение</div>
@@ -201,7 +257,7 @@ def send_thanks_email_to_user(*, name: str, user_email: str, original_message: s
                 </div>
                 <p style="margin:18px 0;">
                   <a href="https://maks-mk.github.io/sov237" style="background:linear-gradient(90deg,#4f46e5,#9333ea);color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;display:inline-block;font-size:14px;">
-                    Узнать о проекта
+                    Узнать больше о проекте
                   </a>
                 </p>
                 <p style="margin:16px 0 0; color:#94a3b8; font-size:13px;">
