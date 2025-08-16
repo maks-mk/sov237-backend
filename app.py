@@ -67,27 +67,17 @@ def create_app() -> Flask:
         if not _looks_like_email(email):
             return jsonify({"error": "Некорректный email"}), 400
 
-        # Логируем сообщение в консоль (вместо отправки email)
-        print(f"=== НОВОЕ СООБЩЕНИЕ ===")
-        print(f"Имя: {name}")
-        print(f"Email: {email}")
-        print(f"Сообщение: {message}")
-        print(f"========================")
+        # Избыточное логирование PII убрано
 
         # Пытаемся отправить email, но не ломаем форму если не получается
         try:
             # Проверяем наличие SMTP настроек
             smtp_host = os.getenv('SMTP_HOST', '')
             if smtp_host:
-                print("[INFO] Отправляем письмо владельцу...")
                 send_email_to_owner(name=name, email=email, message=message)
-                print("[INFO] Письмо владельцу отправлено успешно")
-                
-                print("[INFO] Отправляем автоответ пользователю...")
                 send_thanks_email_to_user(name=name, user_email=email, original_message=message)
-                print("[INFO] Автоответ пользователю отправлен успешно")
             else:
-                print("[INFO] SMTP не настроен, сообщение только в логах")
+                pass  # SMTP не настроен
         except Exception as exc:
             print(f"[WARN] Ошибка отправки email: {exc}")
             import traceback
@@ -129,31 +119,27 @@ def _smtp_config():
 def _smtp_send(msg: MIMEMultipart, recipients: list[str]) -> None:
     smtp_host, smtp_port, smtp_user, smtp_pass, use_tls, use_ssl = _smtp_config()
     
-    print(f"[DEBUG] Подключение к SMTP: {smtp_host}:{smtp_port}")
-    print(f"[DEBUG] Пользователь: {smtp_user}")
-    print(f"[DEBUG] TLS: {use_tls}, SSL: {use_ssl}")
+    # Убрано избыточное логирование SMTP-конфигурации
 
     try:
         if use_ssl:
             # Для SSL подключения (порт 465)
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30, context=context) as server:
-                server.set_debuglevel(1)  # Включаем отладку
+                # server.set_debuglevel(1)  # Отладка SMTP отключена
                 server.login(smtp_user, smtp_pass)
                 server.sendmail(smtp_user, recipients, msg.as_string())
-                print("[DEBUG] Письмо отправлено через SSL")
         else:
             # Для TLS подключения (порт 587)
             context = ssl.create_default_context()
             with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
-                server.set_debuglevel(1)  # Включаем отладку
+                # server.set_debuglevel(1)  # Отладка SMTP отключена
                 server.ehlo()
                 if use_tls:
                     server.starttls(context=context)
                     server.ehlo()
                 server.login(smtp_user, smtp_pass)
                 server.sendmail(smtp_user, recipients, msg.as_string())
-                print("[DEBUG] Письмо отправлено через TLS")
     except smtplib.SMTPAuthenticationError as e:
         print(f"[ERROR] Ошибка аутентификации SMTP: {e}")
         print("[INFO] Проверьте правильность email и пароля приложения Gmail")
@@ -288,4 +274,5 @@ app = create_app()
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', '8000'))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    debug_flag = os.getenv('FLASK_DEBUG', 'false').lower() in ('1','true','yes')
+    app.run(host='0.0.0.0', port=port, debug=debug_flag)
