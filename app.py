@@ -1,7 +1,10 @@
 import os
 import re
+import json
+import hashlib
 import smtplib
 import ssl
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from flask import Flask, request, jsonify, send_from_directory
@@ -19,8 +22,14 @@ def create_app() -> Flask:
         "http://127.0.0.1:8000",
         "http://localhost:5500",
         "http://127.0.0.1:5500",
+        "http://192.168.0.3:8000",
+        "http://192.168.0.3:8000/",
         "null"
     ])
+
+    # === Конфигурация для голосования ===
+    vote_file_path = os.getenv('VOTE_FILE_PATH', './vote.json')
+    vote_salt = os.getenv('VOTE_SALT', 'demo_salt')
 
     @app.route('/ping', methods=["GET", "HEAD"])
     def ping():
@@ -32,11 +41,23 @@ def create_app() -> Flask:
 
     @app.route('/api/votes', methods=['GET'])
     def get_votes():
-        # Возвращаем текущие голоса (можно расширить для сохранения в БД)
+        # Возвращаем текущие голоса из файла + опционально статус пользователя по fingerprint
+        data = _load_votes(vote_file_path)
+        stats = _stats_from_data(data)
+
+        # Опционально проверим статус пользователя, если передан fingerprint
+        fp_b64 = request.args.get('fingerprint', '').strip()
+        user_info = {"hasVoted": False, "userVote": None}
+        if fp_b64:
+            ip = _get_client_ip(request)
+            fp_hash = _hash_fingerprint(fp_b64, vote_salt)
+            has_voted, rec = _has_user_voted(data, fp_hash)
+            user_info["hasVoted"] = has_voted
+            user_info["userVote"] = rec.get("vote") if rec else None
+
         return jsonify({
-            "votesFor": 245,
-            "votesAgainst": 67,
-            "total": 312
+            **stats,
+            **user_info
         })
 
     @app.route('/api/votes', methods=['POST'])
@@ -53,6 +74,65 @@ def create_app() -> Flask:
             "votesAgainst": votes_against,
             "total": votes_for + votes_against
         })
+
+    @app.route('/api/vote', methods=['POST'])
+    def add_vote_route():
+        payload = request.get_json(silent=True) or {}
+        vote_type = (payload.get('vote') or '').strip().lower()
+        fp_b64 = (payload.get('fingerprint') or '').strip()
+
+        if vote_type not in ('for', 'against'):
+            return jsonify({"error": "invalid_vote", "message": "Некорректное значение голоса"}), 400
+        if not fp_b64 or len(fp_b64) > 4096:
+            return jsonify({"error": "invalid_fingerprint", "message": "Некорректный отпечаток"}), 400
+
+        data = _load_votes(vote_file_path)
+        fp_hash = _hash_fingerprint(fp_b64, vote_salt)
+        ip = _get_client_ip(request)
+        ip_hash = _hash_ip(ip, vote_salt)
+
+        already, rec = _has_user_voted(data, fp_hash)
+        if already:
+            stats = _stats_from_data(data)
+            return jsonify({
+                "error": "already_voted",
+                "message": "Вы уже голосовали",
+                "userVote": rec.get('vote') if rec else None,
+                **stats
+            }), 409
+
+        # Добавляем голос
+        try:
+            data = _add_vote(data, fp_hash, vote_type, ip_hash)
+            _save_votes(vote_file_path, data)
+        except Exception:
+            # Если проблемы с ФС — graceful degradation (не роняем)
+            pass
+
+        stats = _stats_from_data(data)
+        return jsonify({
+            "success": True,
+            "message": "Голос учтен",
+            **stats
+        })
+
+    @app.route('/api/vote/check', methods=['GET'])
+    def check_vote_route():
+        fp_b64 = request.args.get('fingerprint', '').strip()
+        if not fp_b64:
+            return jsonify({"error": "invalid_fingerprint", "message": "Отпечаток не задан"}), 400
+
+        data = _load_votes(vote_file_path)
+        fp_hash = _hash_fingerprint(fp_b64, vote_salt)
+        has_voted, rec = _has_user_voted(data, fp_hash)
+        if not has_voted:
+            return jsonify({"hasVoted": False}), 200
+
+        return jsonify({
+            "hasVoted": True,
+            "vote": rec.get('vote'),
+            "timestamp": rec.get('timestamp')
+        }), 200
 
     @app.route('/api/contact', methods=['POST'])
     def contact():
@@ -100,6 +180,96 @@ def _looks_like_email(addr: str) -> bool:
     if "\n" in addr or "\r" in addr:
         return False
     return bool(EMAIL_RE.match(addr))
+
+
+# ======================= Голосование (helpers) =======================
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def _load_votes(path: str) -> dict:
+    """Загрузка данных из vote.json, если нет — создаем минимальную структуру."""
+    try:
+        if not os.path.exists(path):
+            data = {
+                "votes": {"for": 245, "against": 67},
+                "voters": {},
+                "metadata": {"total_votes": 312, "last_updated": _now_iso()}
+            }
+            _save_votes(path, data)
+            return data
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        # Graceful degradation — вернем безопасные значения
+        return {
+            "votes": {"for": 245, "against": 67},
+            "voters": {},
+            "metadata": {"total_votes": 312, "last_updated": _now_iso()}
+        }
+
+
+def _save_votes(path: str, data: dict) -> None:
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"[WARN] Не удалось сохранить vote.json: {exc}")
+
+
+def _hash_fingerprint(fingerprint_b64: str, salt: str) -> str:
+    payload = (salt + '|' + fingerprint_b64).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _hash_ip(ip: str, salt: str) -> str:
+    payload = (salt + '|ip|' + (ip or '')).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _has_user_voted(data: dict, fingerprint_hash: str):
+    rec = (data.get('voters') or {}).get(fingerprint_hash)
+    return (rec is not None), (rec or {})
+
+
+def _add_vote(data: dict, fingerprint_hash: str, vote_type: str, ip_hash: str) -> dict:
+    votes = data.setdefault('votes', {"for": 0, "against": 0})
+    voters = data.setdefault('voters', {})
+    metadata = data.setdefault('metadata', {"total_votes": 0, "last_updated": _now_iso()})
+
+    if fingerprint_hash in voters:
+        return data  # уже голосовал
+
+    if vote_type == 'for':
+        votes['for'] = int(votes.get('for', 0)) + 1
+    else:
+        votes['against'] = int(votes.get('against', 0)) + 1
+
+    voters[fingerprint_hash] = {
+        "vote": vote_type,
+        "timestamp": _now_iso(),
+        "ip_hash": ip_hash
+    }
+
+    total = int(votes.get('for', 0)) + int(votes.get('against', 0))
+    metadata['total_votes'] = total
+    metadata['last_updated'] = _now_iso()
+    return data
+
+
+def _stats_from_data(data: dict) -> dict:
+    votes = data.get('votes') or {}
+    for_c = int(votes.get('for', 0))
+    against_c = int(votes.get('against', 0))
+    total = for_c + against_c
+    return {"votesFor": for_c, "votesAgainst": against_c, "total": total}
+
+
+def _get_client_ip(req) -> str:
+    # Учитываем возможные прокси (например, Render)
+    hdr = req.headers.get('X-Forwarded-For') or ''
+    ip = (hdr.split(',')[0].strip() if hdr else req.remote_addr) or ''
+    return ip
 
 
 def _smtp_config():
